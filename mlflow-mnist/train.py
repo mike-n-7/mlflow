@@ -1,5 +1,7 @@
 from __future__ import print_function
 import argparse
+import mlflow
+import mlflow.pytorch
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -41,6 +43,7 @@ def train(args, model, device, train_loader, optimizer, epoch):
         optimizer.zero_grad()
         output = model(data)
         loss = F.nll_loss(output, target)
+        mlflow.log_metric("training_loss", loss.item())
         loss.backward()
         optimizer.step()
         if batch_idx % args.log_interval == 0:
@@ -62,7 +65,8 @@ def test(model, device, test_loader):
             correct += pred.eq(target.view_as(pred)).sum().item()
 
     test_loss /= len(test_loader.dataset)
-
+    mlflow.log_metric("val_loss", test_loss)
+    mlflow.log_metric("test_acc", correct/len(test_loader.dataset))
     print('\nTest set: Average loss: {:.4f}, Accuracy: {}/{} ({:.0f}%)\n'.format(
         test_loss, correct, len(test_loader.dataset),
         100. * correct / len(test_loader.dataset)))
@@ -87,41 +91,43 @@ def main():
                         help='how many batches to wait before logging training status')
     args = parser.parse_args()
     use_cuda = not args.no_cuda and torch.cuda.is_available()
+    
+    with mlflow.start_run():
+        mlflow.log_param("batch-size", args.batch_size)
+        torch.manual_seed(args.seed)
 
-    torch.manual_seed(args.seed)
+        device = torch.device("cuda" if use_cuda else "cpu")
 
-    device = torch.device("cuda" if use_cuda else "cpu")
+        train_kwargs = {'batch_size': args.batch_size}
+        test_kwargs = {'batch_size': args.batch_size}
+        if use_cuda:
+            cuda_kwargs = {'num_workers': 1,
+                           'pin_memory': True,
+                           'shuffle': True}
+            train_kwargs.update(cuda_kwargs)
+            test_kwargs.update(cuda_kwargs)
 
-    train_kwargs = {'batch_size': args.batch_size}
-    test_kwargs = {'batch_size': args.batch_size}
-    if use_cuda:
-        cuda_kwargs = {'num_workers': 1,
-                       'pin_memory': True,
-                       'shuffle': True}
-        train_kwargs.update(cuda_kwargs)
-        test_kwargs.update(cuda_kwargs)
+        transform=transforms.Compose([
+            transforms.ToTensor(),
+            transforms.Normalize((0.1307,), (0.3081,))
+            ])
+        dataset1 = datasets.MNIST('../data', train=True, download=True,
+                           transform=transform)
+        dataset2 = datasets.MNIST('../data', train=False,
+                           transform=transform)
+        train_loader = torch.utils.data.DataLoader(dataset1,**train_kwargs)
+        test_loader = torch.utils.data.DataLoader(dataset2, **test_kwargs)
 
-    transform=transforms.Compose([
-        transforms.ToTensor(),
-        transforms.Normalize((0.1307,), (0.3081,))
-        ])
-    dataset1 = datasets.MNIST('../data', train=True, download=True,
-                       transform=transform)
-    dataset2 = datasets.MNIST('../data', train=False,
-                       transform=transform)
-    train_loader = torch.utils.data.DataLoader(dataset1,**train_kwargs)
-    test_loader = torch.utils.data.DataLoader(dataset2, **test_kwargs)
+        model = Net().to(device)
+        optimizer = optim.Adadelta(model.parameters(), lr=args.lr)
 
-    model = Net().to(device)
-    optimizer = optim.Adadelta(model.parameters(), lr=args.lr)
-
-    scheduler = StepLR(optimizer, step_size=1, gamma=args.gamma)
-    for epoch in range(1, args.epochs + 1):
-        train(args, model, device, train_loader, optimizer, epoch)
-        test(model, device, test_loader)
-        scheduler.step()
-
-    torch.save(model.state_dict(), "mnist_cnn.pt")
+        scheduler = StepLR(optimizer, step_size=1, gamma=args.gamma)
+        for epoch in range(1, args.epochs + 1):
+            train(args, model, device, train_loader, optimizer, epoch)
+            test(model, device, test_loader)
+            scheduler.step()
+        
+        mlflow.pytorch.log_model(model, "mnist_cnn")
 
 
 if __name__ == '__main__':
